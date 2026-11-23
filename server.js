@@ -1,6 +1,6 @@
 'use strict';
 /* Kowa Kowo – Sistem Absensi. Node.js 18+, tanpa library tambahan.
-   Satu database (data/db.json) dipakai Panel Admin DAN login karyawan. */
+   Mendukung Upstash Redis (KV_REST_API_URL & KV_REST_API_TOKEN) di Vercel dan fallback data/db.json di lokal. */
 const http = require('http'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const os = require('os');
 const PORT = process.env.PORT || 3000;
@@ -26,10 +26,62 @@ const SECRET = process.env.SECRET ? crypto.createHash('sha256').update(process.e
       return k;
     }
   })();
+
+const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '';
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const USE_KV = Boolean(KV_URL && KV_TOKEN);
+const KV_KEY = 'kowa-kowo-absensi:db';
+
 const DBF = path.join(DATA, 'db.json');
-let db = { employees: [], attendance: [], nextId: 1 };
-try { db = JSON.parse(fs.readFileSync(DBF, 'utf8')); } catch (e) {}
-const saveDb = () => { const t = DBF + '.tmp'; fs.writeFileSync(t, JSON.stringify(db)); fs.renameSync(t, DBF); };
+const defaultDb = () => ({ employees: [], attendance: [], nextId: 1 });
+const normalizeDb = raw => {
+  const d = raw && typeof raw === 'object' ? raw : {};
+  return {
+    employees: Array.isArray(d.employees) ? d.employees : [],
+    attendance: Array.isArray(d.attendance) ? d.attendance : [],
+    nextId: Number.isFinite(d.nextId) && d.nextId > 0 ? d.nextId : 1
+  };
+};
+
+let localDb = defaultDb();
+try { localDb = normalizeDb(JSON.parse(fs.readFileSync(DBF, 'utf8'))); } catch (e) {}
+
+async function kvCmd(args) {
+  const r = await fetch(KV_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${KV_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(args)
+  });
+  if (!r.ok) throw new Error('KV HTTP ' + r.status);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j.result;
+}
+
+async function loadDb() {
+  if (!USE_KV) return localDb;
+  const raw = await kvCmd(['GET', KV_KEY]);
+  if (!raw) {
+    const init = normalizeDb(localDb);
+    await kvCmd(['SET', KV_KEY, JSON.stringify(init)]);
+    return init;
+  }
+  return normalizeDb(typeof raw === 'string' ? JSON.parse(raw) : raw);
+}
+
+async function saveDb(db) {
+  if (!USE_KV) {
+    localDb = db;
+    const t = DBF + '.tmp';
+    fs.writeFileSync(t, JSON.stringify(db));
+    fs.renameSync(t, DBF);
+    return;
+  }
+  await kvCmd(['SET', KV_KEY, JSON.stringify(db)]);
+}
 
 /* password disimpan terenkripsi (AES-256-GCM), bisa dibaca admin, tidak tersimpan polos */
 const enc = t => { const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', SECRET, iv); const b = Buffer.concat([c.update(t, 'utf8'), c.final()]); return [iv, c.getAuthTag(), b].map(x => x.toString('base64')).join('.'); };
@@ -60,26 +112,31 @@ const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'applic
 const readBody = req => new Promise(r => { let s = ''; req.on('data', c => { s += c; if (s.length > 1e5) req.destroy(); }); req.on('end', () => { try { r(JSON.parse(s || '{}')); } catch (e) { r({}); } }); });
 const bearer = req => { const h = req.headers.authorization || ''; return h.startsWith('Bearer ') ? verify(h.slice(7)) : null; };
 /* karyawan SELALU dicek ke database pada setiap permintaan: kalau sudah dihapus admin, langsung ditolak */
-const empAuth = req => { const p = bearer(req); return p && p.t === 'emp' ? db.employees.find(e => e.id === p.id) || null : null; };
+const empAuth = (req, db) => { const p = bearer(req); return p && p.t === 'emp' ? db.employees.find(e => e.id === p.id) || null : null; };
 const admAuth = req => { const p = bearer(req); return !!p && p.t === 'adm'; };
-const rowsOf = (month, empId) => db.attendance.filter(a => a.date.startsWith(month) && (!empId || a.emp === empId)).sort((a, b) => b.date.localeCompare(a.date));
+const rowsOf = (db, month, empId) => db.attendance.filter(a => a.date.startsWith(month) && (!empId || a.emp === empId)).sort((a, b) => b.date.localeCompare(a.date));
 
 /* ---------- API ---------- */
 async function api(req, res, u, q) {
   const m = req.method, ip = req.socket.remoteAddress;
-  /* login karyawan: cari di database yang sama dengan panel admin */
-  if (m === 'POST' && u === '/api/login') {
-    const b = await readBody(req), key = ip + '|' + nk(b.name);
-    if (blocked(key)) return json(res, 429, { error: 'Terlalu banyak percobaan. Coba lagi 10 menit lagi.' });
-    const e = db.employees.find(x => nk(x.name) === nk(b.name));
-    if (!e || !same(normPw(dec(e.pw)), normPw(b.password))) { fail(key); return json(res, 401, { error: NOTFOUND }); }
-    return json(res, 200, { token: sign({ t: 'emp', id: e.id, exp: Date.now() + 30 * 864e5 }), name: e.name });
-  }
+
   if (m === 'POST' && u === '/api/admin/login') {
     const b = await readBody(req), key = ip + '|admin';
     if (blocked(key)) return json(res, 429, { error: 'Terlalu banyak percobaan. Coba lagi 10 menit lagi.' });
     if (!same(String(b.pin || ''), ADMIN_PIN)) { fail(key); return json(res, 401, { error: 'PIN salah' }); }
     return json(res, 200, { token: sign({ t: 'adm', exp: Date.now() + 30 * 864e5 }) });
+  }
+
+  const db = await loadDb();
+
+  /* login karyawan: cari di database yang sama dengan panel admin */
+  if (m === 'POST' && u === '/api/login') {
+    const b = await readBody(req), key = ip + '|' + nk(b.name);
+    if (blocked(key)) return json(res, 429, { error: 'Terlalu banyak percobaan. Coba lagi 10 menit lagi.' });
+    const e = db.employees.find(x => nk(x.name) === nk(b.name));
+    const plain = e ? dec(e.pw) : null;
+    if (!e || !plain || !same(normPw(plain), normPw(b.password))) { fail(key); return json(res, 401, { error: NOTFOUND }); }
+    return json(res, 200, { token: sign({ t: 'emp', id: e.id, exp: Date.now() + 30 * 864e5 }), name: e.name });
   }
 
   /* ----- area admin ----- */
@@ -92,7 +149,7 @@ async function api(req, res, u, q) {
       if (name.length < 2) return json(res, 400, { error: 'Nama minimal 2 huruf' });
       if (!/^[A-Z0-9]{4,20}$/.test(pw)) return json(res, 400, { error: 'Password 4-20 karakter, hanya huruf dan angka' });
       if (db.employees.some(x => nk(x.name) === nk(name))) return json(res, 400, { error: 'Nama sudah dipakai karyawan lain' });
-      const e = { id: db.nextId++, name, pw: enc(pw) }; db.employees.push(e); saveDb();
+      const e = { id: db.nextId++, name, pw: enc(pw) }; db.employees.push(e); await saveDb(db);
       return json(res, 200, { id: e.id, name, password: pw });
     }
     const mm = u.match(/^\/api\/admin\/employees\/(\d+)$/);
@@ -112,12 +169,12 @@ async function api(req, res, u, q) {
           if (!/^[A-Z0-9]{4,20}$/.test(pw)) return json(res, 400, { error: 'Password 4-20 karakter, hanya huruf dan angka' });
           e.pw = enc(pw); // password lama langsung tidak berlaku
         }
-        saveDb(); return json(res, 200, { id: e.id, name: e.name, password: dec(e.pw) });
+        await saveDb(db); return json(res, 200, { id: e.id, name: e.name, password: dec(e.pw) });
       }
       if (m === 'DELETE') { // hapus akun + riwayatnya; login dan sesi karyawan itu langsung mati
         db.employees = db.employees.filter(x => x.id !== e.id);
         db.attendance = db.attendance.filter(a => a.emp !== e.id);
-        saveDb(); return json(res, 200, { ok: true });
+        await saveDb(db); return json(res, 200, { ok: true });
       }
     }
     if (m === 'GET' && u === '/api/admin/dashboard') {
@@ -133,33 +190,33 @@ async function api(req, res, u, q) {
     }
     if (m === 'GET' && u === '/api/admin/riwayat') {
       const month = q.get('month') || ymd(wib()).slice(0, 7), id = +q.get('emp') || 0;
-      return json(res, 200, rowsOf(month, id).map(a => ({ date: a.date, name: (db.employees.find(e => e.id === a.emp) || {}).name || '', in: a.in, out: a.out, dur: dur(a.in, a.out), status: a.status })));
+      return json(res, 200, rowsOf(db, month, id).map(a => ({ date: a.date, name: (db.employees.find(e => e.id === a.emp) || {}).name || '', in: a.in, out: a.out, dur: dur(a.in, a.out), status: a.status })));
     }
     return json(res, 404, { error: 'Tidak ditemukan' });
   }
 
   /* ----- area karyawan (wajib masih terdaftar di database) ----- */
-  const e = empAuth(req);
+  const e = empAuth(req, db);
   if (!e) return json(res, 401, { error: NOTFOUND });
   const today = () => db.attendance.find(a => a.emp === e.id && a.date === bd());
   if (m === 'GET' && u === '/api/me') { const t = today(); return json(res, 200, { name: e.name, date: bd(), today: t ? { in: t.in, out: t.out, status: t.status } : null }); }
   if (m === 'GET' && u === '/api/me/riwayat') {
-    const rows = rowsOf(q.get('month') || ymd(wib()).slice(0, 7), e.id);
+    const rows = rowsOf(db, q.get('month') || ymd(wib()).slice(0, 7), e.id);
     return json(res, 200, { hadir: rows.filter(a => a.status === 'Hadir').length, izin: rows.filter(a => a.status !== 'Hadir').length, rows: rows.map(a => ({ date: a.date, in: a.in, out: a.out, dur: dur(a.in, a.out), status: a.status })) });
   }
   if (m === 'POST' && u === '/api/absen/masuk') {
     if (today()) return json(res, 400, { error: 'Kamu sudah absen hari ini' });
-    const t = hm(wib()); db.attendance.push({ emp: e.id, date: bd(), in: t, out: '', status: 'Hadir' }); saveDb(); return json(res, 200, { in: t });
+    const t = hm(wib()); db.attendance.push({ emp: e.id, date: bd(), in: t, out: '', status: 'Hadir' }); await saveDb(db); return json(res, 200, { in: t });
   }
   if (m === 'POST' && u === '/api/absen/pulang') {
     const t = today(); if (!t || !t.in) return json(res, 400, { error: 'Kamu belum absen masuk hari ini' });
     if (t.out) return json(res, 400, { error: 'Kamu sudah absen pulang' });
-    t.out = hm(wib()); saveDb(); return json(res, 200, { out: t.out });
+    t.out = hm(wib()); await saveDb(db); return json(res, 200, { out: t.out });
   }
   if (m === 'POST' && u === '/api/absen/izin') {
     const b = await readBody(req); if (!['Izin', 'Sakit'].includes(b.status)) return json(res, 400, { error: 'Status tidak valid' });
     if (today()) return json(res, 400, { error: 'Data hari ini sudah ada' });
-    db.attendance.push({ emp: e.id, date: bd(), in: '', out: '', status: b.status }); saveDb(); return json(res, 200, { ok: true });
+    db.attendance.push({ emp: e.id, date: bd(), in: '', out: '', status: b.status }); await saveDb(db); return json(res, 200, { ok: true });
   }
   return json(res, 404, { error: 'Tidak ditemukan' });
 }
