@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a2d71">
+<title>Kowa Kowo – Absensi Karyawan</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="apple-touch-icon" href="/logo.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div class="bar"><div class="logo"><i>☕</i><div>Kowa Kowo<small>Absensi Karyawan</small></div></div><nav id="nav"></nav></div></header>
+<main id="app"></main>
+<div id="toast" class="toast" style="display:none"></div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const store=(w,k,v)=>{try{const s=w==='s'?sessionStorage:localStorage;if(v===undefined)return s.getItem(k);v===null?s.removeItem(k):s.setItem(k,v)}catch(e){return null}};
+const tag=s=>`<span class="tag ${s}">${s}</span>`;
+const tgl=s=>new Date(s+'T00:00').toLocaleDateString('id-ID',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+let token=store('s','kk_token'),info=null,changeName=false,month=new Date().toISOString().slice(0,7),tt;
+function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(tt);tt=setTimeout(()=>e.style.display='none',3200)}
+async function api(path,method,body){
+  const r=await fetch('/api'+path,{method:method||'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});
+  let d={};try{d=await r.json()}catch(e){}
+  if(r.status===401&&token&&path!=='/login'){out(); toast('Pengguna Tidak Ditemukan')} // akun dihapus admin -> langsung keluar
+  if(!r.ok)throw new Error(d.error||'Terjadi kesalahan');return d;
+}
+function out(){token=null;info=null;store('s','kk_token',null);render()}
+
+function render(){
+  if(!token||!info){$('nav').innerHTML='';return loginView()}
+  $('nav').innerHTML=`<span>Halo, <b>${esc(info.name.split(' ')[0])}</b></span><button onclick="out()">Keluar</button>`;
+  meView();
+}
+function loginView(){
+  const last=store('l','kk_last'),lu=!changeName&&last;
+  $('app').innerHTML=`<div class="card login"><div class="logo"><i>☕</i>Kowa Kowo</div>
+  ${lu?`<p class="muted">Selamat datang kembali, <b>${esc(last)}</b>. Cukup masukkan password kamu.</p><input id="ln" type="hidden" value="${esc(last)}">`:`<p class="muted">Masukkan nama dan password dari admin.</p><label>Nama</label><input id="ln" autocomplete="off" placeholder="Nama kamu">`}
+  <label>Password</label><input id="lp" type="password" autocapitalize="characters" onkeydown="if(event.key==='Enter')login()">
+  <div class="row"><button class="btn" onclick="login()">Masuk</button></div>
+  ${lu?`<div class="foot" style="margin-top:12px"><a href="#" onclick="changeName=true;render();return false">Bukan kamu? Ganti nama</a></div>`:''}</div>`;
+}
+async function login(){
+  const name=$('ln').value.trim(),password=$('lp').value;
+  if(!name||!password)return toast('Pengguna Tidak Ditemukan');
+  try{const d=await api('/login','POST',{name,password});token=d.token;store('s','kk_token',token);store('l','kk_last',d.name);changeName=false;info=await api('/me');render();toast('Selamat datang, '+d.name.split(' ')[0])}
+  catch(e){toast(e.message)}
+}
+async function meView(){
+  info=await api('/me').catch(()=>null);if(!info)return;
+  $('app').innerHTML=`<div class="grid g2"><div>
+   <div class="card hero"><div class="muted" id="dt"></div><div class="clock" id="clk">--:--:--</div><div class="muted">${esc(info.name)}</div>
+    <div id="st" style="margin:14px 0 4px"></div>
+    <div class="row"><button class="btn" id="bin" onclick="act('masuk')">✅ Absen Masuk</button><button class="btn out" id="bout" onclick="act('pulang')">🏠 Absen Pulang</button></div>
+    <div class="row"><button class="btn out" id="biz" onclick="act('izin','Izin')">📝 Izin</button><button class="btn out" id="bsk" onclick="act('izin','Sakit')">🤒 Sakit</button></div>
+    <div class="help" style="text-align:left">Hari kerja berganti pukul 06.00, jadi absen pulang lewat tengah malam tetap tercatat di hari yang sama.</div></div>
+   <div id="sum" class="grid" style="grid-template-columns:1fr 1fr"></div></div>
+  <div class="card"><h3>Riwayat Kehadiran Saya</h3><div class="filters"><div><label>Bulan</label><input type="month" value="${month}" onchange="month=this.value;hist()"></div></div><br><div class="tw" id="hist"></div></div></div>`;
+  tick();status();hist();
+}
+function tick(){const n=new Date();if($('clk')){$('clk').textContent=n.toLocaleTimeString('id-ID',{hour12:false}).replace(/\./g,':');$('dt').textContent=n.toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}}
+setInterval(tick,1000);
+function status(){
+  const r=info.today;
+  $('st').innerHTML=r?`Status hari ini: ${tag(r.status)} <span class="muted">${r.in?'Masuk '+r.in:''}${r.out?' · Pulang '+r.out:''}</span>`:'<span class="muted">Kamu belum absen hari ini</span>';
+  $('bin').disabled=$('biz').disabled=$('bsk').disabled=!!r;$('bout').disabled=!(r&&r.in&&!r.out);
+}
+async function act(a,s){
+  try{await api('/absen/'+a,'POST',s?{status:s}:undefined);info=await api('/me');status();hist();toast(a==='masuk'?'Absen masuk tercatat':a==='pulang'?'Absen pulang tercatat. Hati-hati di jalan!':s+' tercatat')}
+  catch(e){toast(e.message)}
+}
+async function hist(){
+  const d=await api('/me/riwayat?month='+month).catch(()=>null);if(!d)return;
+  $('sum').innerHTML=`<div class="card stat"><span class="muted">Hadir</span><b style="color:var(--ok)">${d.hadir}</b></div><div class="card stat"><span class="muted">Izin/Sakit</span><b>${d.izin}</b></div>`;
+  $('hist').innerHTML=d.rows.length?`<table><tr><th>Tanggal</th><th>Masuk</th><th>Pulang</th><th>Durasi</th><th>Status</th></tr>${d.rows.map(r=>`<tr><td>${tgl(r.date)}</td><td>${r.in||'-'}</td><td>${r.out||'-'}</td><td>${r.dur}</td><td>${tag(r.status)}</td></tr>`).join('')}</table>`:'<p class="muted">Belum ada riwayat di bulan ini.</p>';
+}
+(async()=>{if(token){try{info=await api('/me')}catch(e){token=null;store('s','kk_token',null)}}render()})();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>

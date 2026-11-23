@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a2d71">
+<title>Kowa Kowo – Panel Admin</title>
+<link rel="icon" type="image/png" href="/logo.png">
+<link rel="apple-touch-icon" href="/logo.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><div class="bar"><div class="logo"><i>☕</i><div>Kowa Kowo<small>Panel Admin</small></div></div><nav id="nav"></nav></div></header>
+<main id="app"></main>
+<div id="toast" class="toast" style="display:none"></div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const store=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);v===null?localStorage.removeItem(k):localStorage.setItem(k,v)}catch(e){return null}};
+const tag=s=>`<span class="tag ${s}">${s}</span>`;
+const tgl=s=>new Date(s+'T00:00').toLocaleDateString('id-ID',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+let token=store('kk_admin'),tab='dash',month=new Date().toISOString().slice(0,7),fe='',editId=null,delId=null,lastNew=null,tt,poll;
+function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(tt);tt=setTimeout(()=>e.style.display='none',3500)}
+async function api(path,method,body){
+  const r=await fetch('/api/admin'+path,{method:method||'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});
+  let d={};try{d=await r.json()}catch(e){}
+  if(r.status===401&&path!=='/login'){token=null;store('kk_admin',null);render()}
+  if(!r.ok)throw new Error(d.error||'Terjadi kesalahan');return d;
+}
+function render(){
+  clearInterval(poll);
+  if(!token){$('nav').innerHTML='';return loginView()}
+  $('nav').innerHTML=[['dash','Dashboard'],['riwayat','Riwayat'],['kary','Karyawan']].map(([k,l])=>`<button class="${tab===k?'on':''}" onclick="tab='${k}';render()">${l}</button>`).join('')+`<button onclick="token=null;store('kk_admin',null);render()">Keluar</button>`;
+  ({dash:dashView,riwayat:riwayatView,kary:karyView})[tab]();
+}
+function loginView(){
+  $('app').innerHTML=`<div class="card login"><div class="logo"><i>☕</i>Kowa Kowo</div><h2 style="text-align:center">Masuk Admin</h2><p class="muted" style="text-align:center">Khusus pemilik atau manajer cafe.</p>
+  <label>PIN Admin</label><input id="ap" type="password" inputmode="numeric" onkeydown="if(event.key==='Enter')loginAdm()"><div class="row"><button class="btn" onclick="loginAdm()">Masuk</button></div></div>`;
+}
+async function loginAdm(){try{const d=await api('/login','POST',{pin:$('ap').value});token=d.token;store('kk_admin',token);render()}catch(e){toast(e.message)}}
+
+/* ----- Dashboard ----- */
+async function dashView(){
+  const d=await api('/dashboard').catch(()=>null);if(!d)return;
+  const chip=(t,c)=>`<span class="tag ${c}" style="display:inline-block;margin:0 6px 8px 0">${esc(t)}</span>`;
+  $('app').innerHTML=`<h2>Dashboard</h2><p class="muted">${tgl(d.date)} · ${d.total} karyawan terdaftar</p><br>
+  <div class="grid g3"><div class="card stat"><span class="muted">Hadir</span><b style="color:var(--ok)">${d.hadir}</b></div>
+  <div class="card stat"><span class="muted">Izin / Sakit</span><b>${d.izin}</b></div>
+  <div class="card stat"><span class="muted">Belum Absen</span><b style="color:var(--bad)">${d.belum.length}</b></div></div>
+  <div class="grid g2"><div class="card"><h3>🟢 Sedang Bertugas</h3>${d.bertugas.length?`<div class="tw"><table><tr><th>Nama</th><th>Masuk</th><th>Sudah bekerja</th></tr>${d.bertugas.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.in}</td><td>${r.lama}</td></tr>`).join('')}</table></div>`:'<p class="muted">Belum ada yang sedang bertugas.</p>'}</div>
+  <div class="card"><h3>⏳ Belum Absen Hari Ini</h3>${d.belum.length?d.belum.map(n=>chip(n,'Belum')).join(''):'<p class="muted">Semua karyawan sudah absen 🎉</p>'}${d.izinList.length?'<h3 style="margin:14px 0 8px">Izin / Sakit</h3>'+d.izinList.map(r=>chip(r.name+' · '+r.status,r.status)).join(''):''}</div></div>`;
+  poll=setInterval(()=>{if(tab==='dash')dashView()},30000);
+}
+
+/* ----- Riwayat ----- */
+async function riwayatView(){
+  const emps=await api('/employees').catch(()=>[]);
+  $('app').innerHTML=`<h2>Riwayat Absensi</h2><p class="muted">Pilih bulan dan karyawan, lalu unduh sebagai CSV.</p><br>
+  <div class="card"><div class="filters"><div><label>Bulan</label><input type="month" value="${month}" onchange="month=this.value;rows()"></div>
+  <div><label>Karyawan</label><select onchange="fe=this.value;rows()"><option value="">Semua</option>${emps.map(e=>`<option value="${e.id}" ${fe==e.id?'selected':''}>${esc(e.name)}</option>`).join('')}</select></div>
+  <button class="btn" onclick="csv()">⬇ Unduh CSV</button></div></div>
+  <div class="card"><div id="sm" class="muted" style="margin-bottom:10px"></div><div class="tw" id="rows"></div></div>`;rows();
+}
+let cur=[];
+async function rows(){
+  cur=await api('/riwayat?month='+month+'&emp='+fe).catch(()=>[]);
+  $('sm').textContent=`${cur.length} catatan · Hadir ${cur.filter(r=>r.status==='Hadir').length} · Izin/Sakit ${cur.filter(r=>r.status!=='Hadir').length}`;
+  $('rows').innerHTML=cur.length?`<table><tr><th>Tanggal</th><th>Nama</th><th>Masuk</th><th>Pulang</th><th>Durasi</th><th>Status</th></tr>${cur.map(r=>`<tr><td>${tgl(r.date)}</td><td>${esc(r.name)}</td><td>${r.in||'-'}</td><td>${r.out||'-'}</td><td>${r.dur}</td><td>${tag(r.status)}</td></tr>`).join('')}</table>`:'<p class="muted">Belum ada data.</p>';
+}
+function csv(){
+  if(!cur.length)return toast('Tidak ada data');
+  const t='Tanggal,Nama,Masuk,Pulang,Durasi,Status\n'+cur.map(r=>[r.date,r.name,r.in,r.out,r.dur,r.status].map(v=>'"'+v+'"').join(',')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));a.download='absensi-kowa-kowo-'+month+'.csv';a.click();
+}
+
+/* ----- Karyawan: tambah / ubah / hapus (langsung ke database) ----- */
+async function karyView(){
+  const emps=await api('/employees').catch(()=>[]),ed=emps.find(e=>e.id===editId);
+  $('app').innerHTML=`<h2>Data Karyawan</h2><p class="muted">Data di sini adalah satu-satunya sumber akun login karyawan.</p><br>
+  <div class="grid g2"><div class="card"><h3>${ed?'Ubah Karyawan':'Tambah Karyawan'}</h3>
+   ${lastNew?`<div class="help" style="margin:0 0 12px">Akun <b>${esc(lastNew.name)}</b> disimpan. Password: <b class="pw">${esc(lastNew.password)}</b></div>`:''}
+   <label>Nama Lengkap</label><input id="n" value="${ed?esc(ed.name):''}">
+   <label>Password ${ed?'(ubah di sini, yang lama langsung tidak berlaku)':'(kosongkan untuk dibuat acak)'}</label><input id="p" class="pw" maxlength="20" value="${ed?esc(ed.password):''}" placeholder="Contoh: GWWXE5">
+   <div class="row"><button class="btn" onclick="save()">${ed?'Simpan Perubahan':'+ Simpan'}</button>${ed?'<button class="btn out" onclick="editId=null;karyView()">Batal</button>':''}</div></div>
+  <div class="card"><h3>Daftar (${emps.length})</h3><div class="tw"><table><tr><th>Nama</th><th>Password</th><th></th></tr>
+  ${emps.map(e=>`<tr><td>${esc(e.name)}</td><td><b class="pw">${esc(e.password)}</b></td><td>${delId===e.id?`<span class="muted" style="margin-right:6px">Yakin? Riwayatnya ikut terhapus.</span><button class="btn red sm" onclick="del(${e.id})">Ya, hapus</button> <button class="btn out sm" onclick="delId=null;karyView()">Batal</button>`:`<button class="btn out sm" onclick="editId=${e.id};delId=null;lastNew=null;karyView()">Ubah</button> <button class="btn red sm" onclick="delId=${e.id};karyView()">Hapus</button>`}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Belum ada karyawan.</td></tr>'}</table></div></div></div>`;
+}
+async function save(){
+  const name=$('n').value.trim(),password=$('p').value.trim();
+  try{
+    if(editId){await api('/employees/'+editId,'PUT',{name,password});editId=null;lastNew=null;toast('Perubahan disimpan. Password lama tidak berlaku lagi')}
+    else{lastNew=await api('/employees','POST',{name,password});toast('Karyawan ditambahkan, langsung bisa login')}
+    karyView();
+  }catch(e){toast(e.message)}
+}
+async function del(id){try{await api('/employees/'+id,'DELETE');delId=null;lastNew=null;toast('Karyawan dihapus. Akunnya tidak bisa login lagi');karyView()}catch(e){toast(e.message)}}
+render();
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "Kowa Kowo Cafe",
+  "short_name": "Kowa Kowo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a2d71",
+  "theme_color": "#1a2d71",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "200x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
